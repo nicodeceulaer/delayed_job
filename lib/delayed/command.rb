@@ -1,4 +1,8 @@
-require 'daemons'
+begin
+  require 'daemons'
+rescue LoadError
+  raise "You need to add gem 'daemons' to your Gemfile if you wish to use it."
+end
 require 'optparse'
 
 module Delayed
@@ -44,7 +48,10 @@ module Delayed
           @monitor = true
         end
         opts.on('--sleep-delay N', "Amount of time to sleep when no jobs are found") do |n|
-          @options[:sleep_delay] = n
+          @options[:sleep_delay] = n.to_i
+        end
+        opts.on('--read-ahead N', "Number of jobs from the queue to consider") do |n|
+          @options[:read_ahead] = n
         end
         opts.on('-p', '--prefix NAME', "String to be prefixed to worker process names") do |prefix|
           @options[:prefix] = prefix
@@ -91,7 +98,7 @@ module Delayed
       Dir.chdir(Rails.root)
 
       Delayed::Worker.after_fork
-      Delayed::Worker.logger = Logger.new(File.join(Rails.root, 'log', 'delayed_job.log'))
+      Delayed::Worker.logger ||= Logger.new(File.join(Rails.root, 'log', 'delayed_job.log'))
 
       worker = Delayed::Worker.new(@options)
       worker.name_prefix = "#{worker_name} "
