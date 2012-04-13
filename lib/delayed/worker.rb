@@ -2,20 +2,46 @@ require 'timeout'
 require 'active_support/core_ext/numeric/time'
 require 'active_support/core_ext/class/attribute_accessors'
 require 'active_support/core_ext/kernel'
+require 'active_support/core_ext/enumerable'
 require 'logger'
+require 'benchmark'
 
 module Delayed
   class Worker
-    cattr_accessor :min_priority, :max_priority, :max_attempts, :max_run_time, :default_priority, :sleep_delay, :logger, :delay_jobs
-    self.sleep_delay = 5
-    self.max_attempts = 25
-    self.max_run_time = 4.hours
-    self.default_priority = 0
-    self.delay_jobs = true
+    DEFAULT_SLEEP_DELAY      = 5
+    DEFAULT_MAX_ATTEMPTS     = 25
+    DEFAULT_MAX_RUN_TIME     = 4.hours
+    DEFAULT_DEFAULT_PRIORITY = 0
+    DEFAULT_DELAY_JOBS       = true
+    DEFAULT_QUEUES           = []
+    DEFAULT_READ_AHEAD       = 5
+
+    cattr_accessor :min_priority, :max_priority, :max_attempts, :max_run_time,
+      :default_priority, :sleep_delay, :logger, :delay_jobs, :queues,
+      :read_ahead, :plugins, :destroy_failed_jobs
+
+    cattr_reader :backend
+
+    # name_prefix is ignored if name is set directly
+    attr_accessor :name_prefix
+
+    def self.reset
+      self.sleep_delay      = DEFAULT_SLEEP_DELAY
+      self.max_attempts     = DEFAULT_MAX_ATTEMPTS
+      self.max_run_time     = DEFAULT_MAX_RUN_TIME
+      self.default_priority = DEFAULT_DEFAULT_PRIORITY
+      self.delay_jobs       = DEFAULT_DELAY_JOBS
+      self.queues           = DEFAULT_QUEUES
+      self.read_ahead       = DEFAULT_READ_AHEAD
+    end
+
+    reset
+
+    # Add or remove plugins in this list before the worker is instantiated
+    self.plugins = [Delayed::Plugins::ClearLocks]
 
     # By default failed jobs are destroyed after too many attempts. If you want to keep them around
     # (perhaps to inspect the reason for the failure), set this to false.
-    cattr_accessor :destroy_failed_jobs
     self.destroy_failed_jobs = true
 
     self.logger = if defined?(Rails)
@@ -23,11 +49,6 @@ module Delayed
     elsif defined?(RAILS_DEFAULT_LOGGER)
       RAILS_DEFAULT_LOGGER
     end
-
-    # name_prefix is ignored if name is set directly
-    attr_accessor :name_prefix
-
-    cattr_reader :backend
 
     def self.backend=(backend)
       if backend.is_a? Symbol
@@ -40,14 +61,46 @@ module Delayed
     end
 
     def self.guess_backend
-      self.backend ||= :active_record if defined?(ActiveRecord)
+      warn "[DEPRECATION] guess_backend is deprecated. Please remove it from your code."
+    end
+
+    def self.before_fork
+      unless @files_to_reopen
+        @files_to_reopen = []
+        ObjectSpace.each_object(File) do |file|
+          @files_to_reopen << file unless file.closed?
+        end
+      end
+
+      backend.before_fork
+    end
+
+    def self.after_fork
+      # Re-open file handles
+      @files_to_reopen.each do |file|
+        begin
+          file.reopen file.path, "a+"
+          file.sync = true
+        rescue ::Exception
+        end
+      end
+
+      backend.after_fork
+    end
+
+    def self.lifecycle
+      @lifecycle ||= Delayed::Lifecycle.new
     end
 
     def initialize(options={})
       @quiet = options.has_key?(:quiet) ? options[:quiet] : true
       self.class.min_priority = options[:min_priority] if options.has_key?(:min_priority)
       self.class.max_priority = options[:max_priority] if options.has_key?(:max_priority)
-      self.class.sleep_delay = options[:sleep_delay] if options.has_key?(:sleep_delay)
+      self.class.sleep_delay  = options[:sleep_delay] if options.has_key?(:sleep_delay)
+      self.class.read_ahead   = options[:read_ahead] if options.has_key?(:read_ahead)
+      self.class.queues       = options[:queues] if options.has_key?(:queues)
+
+      self.plugins.each { |klass| klass.new }
     end
 
     # Every worker has a unique name which by default is the pid of the process. There are some
@@ -66,33 +119,42 @@ module Delayed
     end
 
     def start
+      trap('TERM') { say 'Exiting...'; stop }
+      trap('INT')  { say 'Exiting...'; stop }
+
       say "Starting job worker"
 
-      trap('TERM') { say 'Exiting...'; $exit = true }
-      trap('INT')  { say 'Exiting...'; $exit = true }
+      self.class.lifecycle.run_callbacks(:execute, self) do
+        loop do
+          self.class.lifecycle.run_callbacks(:loop, self) do
+            result = nil
 
-      loop do
-        result = nil
+            realtime = Benchmark.realtime do
+              result = work_off
+            end
 
-        realtime = Benchmark.realtime do
-          result = work_off
+            count = result.sum
+
+            break if stop?
+
+            if count.zero?
+              sleep(self.class.sleep_delay)
+            else
+              say "#{count} jobs processed at %.4f j/s, %d failed ..." % [count / realtime, result.last]
+            end
+          end
+
+          break if stop?
         end
-
-        count = result.sum
-
-        break if $exit
-
-        if count.zero?
-          sleep(self.class.sleep_delay)
-        else
-          say "#{count} jobs processed at %.4f j/s, %d failed ..." % [count / realtime, result.last]
-        end
-
-        break if $exit
       end
+    end
 
-    ensure
-      Delayed::Job.clear_locks!(name)
+    def stop
+      @exit = true
+    end
+
+    def stop?
+      !!@exit
     end
 
     # Do num jobs and return stats on success/failure.
@@ -109,7 +171,7 @@ module Delayed
         else
           break  # leave if no work could be done
         end
-        break if $exit # leave if we're exiting
+        break if stop? # leave if we're exiting
       end
 
       return [success, failure]
@@ -123,10 +185,10 @@ module Delayed
       say "#{job.name} completed after %.4f" % runtime
       return true  # did work
     rescue DeserializationError => error
-      job.last_error = "{#{error.message}\n#{error.backtrace.join('\n')}"
+      job.last_error = "{#{error.message}\n#{error.backtrace.join("\n")}"
       failed(job)
     rescue Exception => error
-      handle_failed_job(job, error)
+      self.class.lifecycle.run_callbacks(:error, self, job){ handle_failed_job(job, error) }
       return false  # work failed
     end
 
@@ -145,11 +207,10 @@ module Delayed
     end
 
     def failed(job)
-      job.hook(:failure)
-      if job.respond_to?(:on_permanent_failure)
-        warn "[DEPRECATION] The #on_permanent_failure hook has been renamed to #failure."
+      self.class.lifecycle.run_callbacks(:failure, self, job) do
+        job.hook(:failure)
+        self.class.destroy_failed_jobs ? job.destroy : job.fail!
       end
-      self.class.destroy_failed_jobs ? job.destroy : job.update_attributes(:failed_at => Delayed::Job.db_time_now)
     end
 
     def say(text, level = Logger::INFO)
@@ -161,11 +222,11 @@ module Delayed
     def max_attempts(job)
       job.max_attempts || self.class.max_attempts
     end
-    
+
   protected
 
     def handle_failed_job(job, error)
-      job.last_error = "{#{error.message}\n#{error.backtrace.join('\n')}"
+      job.last_error = "{#{error.message}\n#{error.backtrace.join("\n")}"
       say "#{job.name} failed with #{error.class.name}: #{error.message} - #{job.attempts} failed attempts", Logger::ERROR
       reschedule(job)
     end
@@ -174,7 +235,7 @@ module Delayed
     # If no jobs are left we return nil
     def reserve_and_run_one_job
       job = Delayed::Job.reserve(self)
-      run(job) if job
+      self.class.lifecycle.run_callbacks(:perform, self, job){ result = run(job) } if job
     end
   end
 
