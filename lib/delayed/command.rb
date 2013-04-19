@@ -65,6 +65,9 @@ module Delayed
         opts.on('--multiple', 'Specifies whether multiple instances of the same script are allowed to run at the same time') do
           @multiple = true
         end
+        opts.on('--exit-on-complete', "Exit when no more jobs are available to run. This will exit if all jobs are scheduled to run in the future.") do
+          @options[:exit_on_complete] = true
+        end
       end
       @args = opts.parse!(args)
     end
