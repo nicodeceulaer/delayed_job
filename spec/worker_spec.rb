@@ -1,4 +1,4 @@
-require 'spec_helper'
+require 'helper'
 
 describe Delayed::Worker do
   describe "backend=" do
@@ -18,6 +18,19 @@ describe Delayed::Worker do
     it "sets backend with a symbol" do
       Delayed::Worker.backend = :test
       expect(Delayed::Worker.backend).to eq(Delayed::Backend::Test::Job)
+    end
+  end
+
+  describe "job_say" do
+    before do
+      @worker = Delayed::Worker.new
+      @job = stub('job', :id => 123, :name => 'ExampleJob')
+    end
+
+    it "logs with job name and id" do
+      @worker.should_receive(:say).
+        with('Job ExampleJob (id=123) message', Delayed::Worker::DEFAULT_LOG_LEVEL)
+      @worker.job_say(@job, 'message')
     end
   end
 

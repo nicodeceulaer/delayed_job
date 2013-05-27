@@ -3,11 +3,14 @@ Delayed::Job
 [![Gem Version](https://badge.fury.io/rb/delayed_job.png)][gem]
 [![Build Status](https://secure.travis-ci.org/collectiveidea/delayed_job.png?branch=master)][travis]
 [![Dependency Status](https://gemnasium.com/collectiveidea/delayed_job.png?travis)][gemnasium]
-[![Code Climate](https://codeclimate.com/badge.png)][codeclimate]
+[![Code Climate](https://codeclimate.com/github/collectiveidea/delayed_job.png)][codeclimate]
+[![Coverage Status](https://coveralls.io/repos/collectiveidea/delayed_job/badge.png?branch=master)][coveralls]
+
 [gem]: https://rubygems.org/gems/delayed_job
 [travis]: http://travis-ci.org/collectiveidea/delayed_job
 [gemnasium]: https://gemnasium.com/collectiveidea/delayed_job
 [codeclimate]: https://codeclimate.com/github/collectiveidea/delayed_job
+[coveralls]: https://coveralls.io/r/collectiveidea/delayed_job
 
 Delayed::Job (or DJ) encapsulates the common pattern of asynchronously executing
 longer tasks in the background.
@@ -37,11 +40,15 @@ for other backends](http://wiki.github.com/collectiveidea/delayed_job/backends).
 
 If you plan to use delayed_job with Active Record, add `delayed_job_active_record` to your `Gemfile`.
 
-    gem 'delayed_job_active_record'
+```ruby
+gem 'delayed_job_active_record'
+```
 
 If you plan to use delayed_job with Mongoid, add `delayed_job_mongoid` to your `Gemfile`.
 
-    gem 'delayed_job_mongoid'
+```ruby
+gem 'delayed_job_mongoid'
+```
 
 Run `bundle install` to install the backend and delayed_job gems.
 
@@ -64,11 +71,13 @@ Queuing Jobs
 ============
 Call `.delay.method(params)` on any object and it will be processed in the background.
 
-    # without delayed_job
-    @user.activate!(@device)
+```ruby
+# without delayed_job
+@user.activate!(@device)
 
-    # with delayed_job
-    @user.delay.activate!(@device)
+# with delayed_job
+@user.delay.activate!(@device)
+```
 
 If a method should always be run in the background, you can call
 `#handle_asynchronously` after the method declaration:
@@ -119,6 +128,8 @@ class LongTasks
   handle_asynchronously :call_an_instance_method, :priority => Proc.new {|i| i.how_important }
 end
 ```
+
+If you ever want to call a `handle_asynchronously`'d method without Delayed Job, for instance while debugging something at the console, just add `_without_delay` to the method name. For instance, if your original method was `foo`, then call `foo_without_delay`.
 
 Rails 3 Mailers
 ===============
@@ -177,6 +188,8 @@ You can then do the following:
     # or to run in the foreground
     RAILS_ENV=production script/delayed_job run --exit-on-complete
 
+**Rails 4:** *replace script/delayed_job with bin/delayed_job*
+
 Workers can be running on any computer, as long as they have access to the
 database and their clock is in sync. Keep in mind that each worker will check
 the database at least every 5 seconds.
@@ -190,6 +203,21 @@ Work off queues by setting the `QUEUE` or `QUEUES` environment variable.
 
     QUEUE=tracking rake jobs:work
     QUEUES=mailers,tasks rake jobs:work
+    
+Restarting delayed_job
+======================
+
+The following syntax will restart delayed jobs:
+
+    RAILS_ENV=production script/delayed_job restart
+
+To restart multiple delayed_job workers:
+
+    RAILS_ENV=production script/delayed_job -n2 restart
+    
+**Rails 4:** *replace script/delayed_job with bin/delayed_job*
+
+
 
 Custom Jobs
 ===========
@@ -204,6 +232,19 @@ end
 
 Delayed::Job.enqueue NewsletterJob.new('lorem ipsum...', Customers.find(:all).collect(&:email))
 ```
+To set a per-job max attempts that overrides the Delayed::Worker.max_attempts you can define a max_attempts method on the job
+```ruby
+class NewsletterJob < Struct.new(:text, :emails)
+  def perform
+    emails.each { |e| NewsletterMailer.deliver_text_to_email(text, e) }
+  end
+  
+  def max_attempts
+    return 3
+  end
+end
+````
+
 
 Hooks
 =====
